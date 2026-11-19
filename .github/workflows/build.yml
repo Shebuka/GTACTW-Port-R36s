@@ -1,0 +1,132 @@
+name: Build and package Debian11
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container: debian:11
+
+    steps:
+      - name: Point apt at Debian archive
+        run: |
+          cat > /etc/apt/sources.list <<'EOF'
+          deb http://archive.debian.org/debian bullseye main
+          deb http://archive.debian.org/debian-security bullseye-security main
+          EOF
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
+
+      - name: Install git and certificates
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dpkg --add-architecture armhf
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            make \
+            zip \
+            unzip \
+            gcc-arm-linux-gnueabihf \
+            binutils-arm-linux-gnueabihf \
+            libsdl2-dev:armhf \
+            libopenal-dev:armhf \
+            libgles2-mesa-dev:armhf \
+            libegl1-mesa-dev:armhf \
+            libmpg123-dev:armhf \
+            zlib1g-dev:armhf
+
+      - name: Build
+        run: |
+          # The Debian 11 container is itself the glibc 2.31 sysroot.
+          make clean
+          make SYSROOT=/
+          make portmaster SYSROOT=/ BULLSEYE=/
+
+      - name: Check binaries
+        run: |
+          ls -la
+          for f in gtactw_r36 \
+                   gta-ctw-portmaster/gtactw/gtactw.armhf \
+                   gta-ctw-portmaster/gtactw/installer.armhf; do
+            echo "=== $f ==="
+            arm-linux-gnueabihf-readelf -V "$f" \
+              | grep -oE 'GLIBC_[0-9.]+' | sort -uV || true
+          done
+
+      - name: Package PortMaster zip
+        run: |
+          set -euo pipefail
+
+          # The launcher expects these at the port root:
+          #   GTA Chinatown Wars.sh
+          #   port.json / gameinfo.xml / screenshot.png / README.md
+          #   gtactw/  (binaries, gptk, licenses, optional libs.armhf)
+          stage="release/gtactw"
+          meta_src="gta-ctw-portmaster"
+          if [ ! -f "$meta_src/port.json" ]; then
+            meta_src="$meta_src/gtactw"
+          fi
+
+          rm -rf "$stage" gtactw.zip
+          mkdir -p "$stage/gtactw"
+          cp -a gta-ctw-portmaster/gtactw/. "$stage/gtactw/"
+
+          for f in port.json gameinfo.xml screenshot.png README.md; do
+            test -f "$meta_src/$f"
+            rm -f "$stage/gtactw/$f"
+            cp "$meta_src/$f" "$stage/$f"
+          done
+          cp "gta-ctw-portmaster/GTA Chinatown Wars.sh" "$stage/"
+
+          ( cd "$stage" && zip -9 -r "$GITHUB_WORKSPACE/gtactw.zip" \
+              "GTA Chinatown Wars.sh" port.json gameinfo.xml \
+              screenshot.png README.md gtactw )
+
+          # Expose individual package binaries for manual in-place updates.
+          artifacts="release/artifacts"
+          rm -rf "$artifacts"
+          mkdir -p "$artifacts"
+          cp "$GITHUB_WORKSPACE/gtactw.zip" "$artifacts/"
+          cp gta-ctw-portmaster/gtactw/gtactw.armhf \
+             gta-ctw-portmaster/gtactw/installer.armhf \
+             gta-ctw-portmaster/gtactw/libclock_fix.so "$artifacts/"
+
+      - name: Verify package
+        run: |
+          set -euo pipefail
+          unzip -l gtactw.zip
+          unzip -Z1 gtactw.zip | grep -qx 'GTA Chinatown Wars.sh'
+          unzip -Z1 gtactw.zip | grep -qx 'port.json'
+          unzip -Z1 gtactw.zip | grep -qx 'gtactw/gtactw.armhf'
+          unzip -Z1 gtactw.zip | grep -qx 'gtactw/installer.armhf'
+          unzip -Z1 gtactw.zip | grep -qx 'gtactw/libclock_fix.so'
+
+      - name: Upload PortMaster package and update binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: gtactw-portmaster
+          path: release/artifacts/
+          if-no-files-found: error
+
+      - name: Attach package to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/artifacts/gtactw.zip
+            release/artifacts/gtactw.armhf
+            release/artifacts/installer.armhf
+            release/artifacts/libclock_fix.so
