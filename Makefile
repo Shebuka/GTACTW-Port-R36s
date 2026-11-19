@@ -37,8 +37,11 @@ SRCS    := src/main.c \
            src/mpg123_patch.c
 
 OBJS    := $(SRCS:.c=.o)
-TARGET  := gtactw_r36
-PRELOAD := libclock_fix.so
+TARGET   := gtactw
+PRELOAD  := libclock_fix.so
+
+# PortMaster release package directory (the launcher runs gtactw/gtactw.armhf).
+PACKAGE_DIR := gta-ctw-portmaster/gtactw
 
 # ── PortMaster (old-glibc) build ───────────────────────────────────────────
 # Links against a Debian 11 "bullseye" glibc-2.31 sysroot so the binary runs
@@ -81,8 +84,10 @@ PM_LDFLAGS := --sysroot=$(BULLSEYE) \
              -Wl,-rpath-link,$(SYSROOT)/usr/lib/arm-linux-gnueabihf \
              -Wl,--allow-shlib-undefined
 
-PM_OBJS   := $(SRCS:.c=.pm.o)
-PM_TARGET := $(TARGET).pm
+PM_OBJS    := $(SRCS:.c=.pm.o)
+PM_TARGET  := $(PACKAGE_DIR)/$(TARGET).armhf
+PM_PRELOAD := $(PACKAGE_DIR)/$(PRELOAD)
+R_TARGET   := $(TARGET)_r36
 
 # ── First-run installer ────────────────────────────────────────────────────
 # Standalone SDL2 splash + extractor, run by the launcher only when the game
@@ -90,7 +95,7 @@ PM_TARGET := $(TARGET).pm
 # no mpg123): it must be able to draw even on a device where the game's
 # EGL/GLES path is broken.  Built with the same bullseye flags so it carries
 # the same low glibc floor as the game binary.
-INSTALLER_TARGET := installer.armhf
+INSTALLER_TARGET := $(PACKAGE_DIR)/installer.armhf
 INSTALLER_LDFLAGS := --sysroot=$(BULLSEYE) \
              -L$(BULLSEYE)/usr/lib/arm-linux-gnueabihf \
              -L$(BULLSEYE)/lib/arm-linux-gnueabihf \
@@ -101,18 +106,22 @@ INSTALLER_LDFLAGS := --sysroot=$(BULLSEYE) \
 
 .PHONY: all clean setup data install check-syms portmaster installer font
 
-all: $(TARGET) $(PRELOAD)
+all: $(R_TARGET) $(PRELOAD)
 
-# Build the old-glibc binary + preload for PortMaster distribution.
-portmaster: $(PM_TARGET) $(PRELOAD) $(INSTALLER_TARGET)
+# Build the old-glibc binary + preload directly into the PortMaster package.
+portmaster: $(PM_TARGET) $(PM_PRELOAD) $(INSTALLER_TARGET)
 	@echo "=== $(PM_TARGET): glibc version requirements ==="
 	@$(CROSS)objdump -T $(PM_TARGET) | grep -oE 'GLIBC_[0-9.]+' | sort -u | tr '\n' ' '; echo
 	@echo "=== $(INSTALLER_TARGET): glibc version requirements ==="
 	@$(CROSS)objdump -T $(INSTALLER_TARGET) | grep -oE 'GLIBC_[0-9.]+' | sort -u | tr '\n' ' '; echo
+	@echo "=== PortMaster files staged in $(PACKAGE_DIR) ==="
 
 installer: $(INSTALLER_TARGET)
 
-$(INSTALLER_TARGET): src/installer.c src/png_min.c src/png_min.h src/installer_font.h
+$(PACKAGE_DIR):
+	mkdir -p $@
+
+$(INSTALLER_TARGET): src/installer.c src/png_min.c src/png_min.h src/installer_font.h | $(PACKAGE_DIR)
 	$(CC) $(PM_CFLAGS) -o $@ src/installer.c src/png_min.c $(INSTALLER_LDFLAGS)
 
 # Regenerate the embedded bitmap font (authoring-time only; the header is
@@ -120,8 +129,11 @@ $(INSTALLER_TARGET): src/installer.c src/png_min.c src/png_min.h src/installer_f
 font:
 	python3 scripts/gen-installer-font.py
 
-$(PM_TARGET): $(PM_OBJS)
+$(PM_TARGET): $(PM_OBJS) | $(PACKAGE_DIR)
 	$(CC) $(PM_CFLAGS) -o $@ $^ $(PM_LDFLAGS)
+
+$(PM_PRELOAD): $(PRELOAD) | $(PACKAGE_DIR)
+	cp $< $@
 
 src/%.pm.o: src/%.c
 	$(CC) $(PM_CFLAGS) -c -o $@ $<
@@ -133,14 +145,16 @@ $(PRELOAD): src/clock_preload.c src/clock_preload.map
 	  -Wl,--version-script=src/clock_preload.map \
 	  -o $@ $<
 
-$(TARGET): $(OBJS)
+$(R_TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(PRELOAD)
+	rm -f $(OBJS) $(PM_OBJS) $(R_TARGET) $(PRELOAD) \
+	      $(PM_TARGET) $(INSTALLER_TARGET) $(PM_PRELOAD)
+	rm -f gtactw_r36.pm gtactw.armhf installer.armhf
 
 # Install cross-dev packages for armhf (requires sudo)
 setup:
@@ -166,7 +180,7 @@ $(DATA_PATH):
 
 # Copy binary + data to device (set DEVICE_IP or use SSH)
 install: all data
-	scp $(TARGET) $(DATA_PATH)/libCTW.so $(DATA_PATH)/main.4.com.rockstargames.gtactw.obb \
+	scp $(R_TARGET) $(DATA_PATH)/libCTW.so $(DATA_PATH)/main.4.com.rockstargames.gtactw.obb \
 	    $(if $(DEVICE_IP),root@$(DEVICE_IP):/opt/gtactw/,$(DATA_PATH)/)
 
 # Print all unresolved symbols from the .so to verify our symbol table
