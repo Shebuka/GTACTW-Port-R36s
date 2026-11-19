@@ -110,7 +110,8 @@ The log lives at `/roms/ports/gtactw/gtactw.log` for postmortem debugging.
 
 - **CPU**: ARM Cortex-A35 (ARMv8) running in ARMv7-A 32-bit mode, NEON, hard-float
 - **GPU**: Mali-400 MP2 (Utgard) on original R36S, or Mali-Bifrost G31 on clones — both work
-- **Display**: 640×480
+- **Display**: 640×480 native, presented in a centred 4:3 viewport on the
+  device panel (720×720 R36 Ultra supported)
 - **OS**: dArkOS (Linux 6.x, glibc 2.36+, SDL2, ALSA, OpenAL Soft, mpg123)
 - **Audio**: ALSA only (no PulseAudio/PipeWire on the device)
 

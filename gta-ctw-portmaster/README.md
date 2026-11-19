@@ -143,8 +143,9 @@ unset and SDL uses its own EGL/GL loading.
 - **Ports location:** the launcher passes its own directory to the game via
   `GTACTW_DIR`, so it works from any mount (internal, SD1, SD2) and any CFW's
   ports path — not just `/roms/ports`.
-- **Resolution:** renders at a fixed **640×480** (baked into the engine). On
-  higher-res panels the firmware scales/letterboxes it.
+- **Resolution:** the engine renders at its native **640×480**; the loader
+  presents that in a centred 4:3 viewport scaled to the actual panel, with
+  black bars on non-4:3 screens (e.g. a 720×720 R36 Ultra).
 - **Root / no `sudo`:** some images run as root and ship no `sudo` binary. The
   launcher no longer assumes `sudo` exists — as root it drops the prefix
   entirely, and as a normal user it only uses `sudo` if it is actually
