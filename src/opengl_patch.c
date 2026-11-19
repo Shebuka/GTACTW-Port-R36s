@@ -7,12 +7,32 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "config.h"
 #include "so_util.h"
 #include "opengl_patch.h"
 
 extern so_module gtactw_mod;
 
+/* Physical backbuffer and centred 4:3 game viewport, owned by main.c. */
+extern int g_phys_w, g_phys_h;
+extern int g_view_x, g_view_y, g_view_w, g_view_h;
+
 static GLuint cur_prog;
+static GLuint g_cur_fbo = 0;
+static int    g_frame_color_cleared = 0;
+
+/* Tracked so the per-frame letterbox clear does not need glGet* (a pipeline
+ * stall on Mali-400).  These are the GL defaults until the game changes them. */
+static GLfloat   g_clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+static GLboolean g_color_mask[4]  = { GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
+
+/* The engine's last logical viewport/scissor.  GL keeps these per-context, not
+ * per-framebuffer, so they must be re-applied in the right coordinate space
+ * whenever the game switches between the default framebuffer and an FBO. */
+static GLint   g_last_vp_x = 0, g_last_vp_y = 0;
+static GLsizei g_last_vp_w = SCREEN_W, g_last_vp_h = SCREEN_H;
+static GLint   g_last_sc_x = 0, g_last_sc_y = 0;
+static GLsizei g_last_sc_w = SCREEN_W, g_last_sc_h = SCREEN_H;
 
 /* Camera view matrix — captured from first p=18 MV upload per frame.
  * Used by fix_sprite_translation to convert p=12 world-space translations
@@ -35,8 +55,145 @@ void glEnableHook(GLenum cap)          { glEnable(cap); }
 void glDisableHook(GLenum cap)         { glDisable(cap); }
 void glDepthMaskHook(GLboolean flag)   { glDepthMask(flag); }
 
+void glColorMaskHook(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+    g_color_mask[0] = r;
+    g_color_mask[1] = g;
+    g_color_mask[2] = b;
+    g_color_mask[3] = a;
+    glColorMask(r, g, b, a);
+}
+
 void glBindFramebufferHook(GLenum target, GLuint fbo) {
     glBindFramebuffer(target, fbo);
+    if (target != GL_FRAMEBUFFER)
+        return;
+
+    g_cur_fbo = fbo;
+    /* Re-apply the engine's logical state in the coordinate space of the
+     * newly bound target.  Without this, an FBO's 640×480 viewport would
+     * remain active after returning to a larger default framebuffer. */
+    glViewportHook(g_last_vp_x, g_last_vp_y, g_last_vp_w, g_last_vp_h);
+    glScissorHook(g_last_sc_x, g_last_sc_y, g_last_sc_w, g_last_sc_h);
+}
+
+/* ── Logical 640×480 → centred physical viewport ─────────────────────────
+ * libCTW always renders a 640×480 frame.  The default framebuffer may be a
+ * different size (720×720, 1280×720, …), so remap its viewport and scissor
+ * into the centred 4:3 area.  Offscreen FBOs keep their original coordinates:
+ * those targets are the engine's own 640×480 render surfaces. */
+static int viewport_letterboxed(void) {
+    return g_view_w > 0 && g_view_h > 0 &&
+           (g_view_w != g_phys_w || g_view_h != g_phys_h);
+}
+
+static GLint map_viewport_x(GLint x) {
+    return g_view_x + (x * g_view_w) / SCREEN_W;
+}
+
+static GLint map_viewport_y(GLint y) {
+    return g_view_y + (y * g_view_h) / SCREEN_H;
+}
+
+static GLsizei map_viewport_w(GLsizei w) {
+    GLsizei v;
+    if (w <= 0) return 0;
+    v = (w * g_view_w) / SCREEN_W;
+    return v > 0 ? v : 1;
+}
+
+static GLsizei map_viewport_h(GLsizei h) {
+    GLsizei v;
+    if (h <= 0) return 0;
+    v = (h * g_view_h) / SCREEN_H;
+    return v > 0 ? v : 1;
+}
+
+void glViewportHook(GLint x, GLint y, GLsizei w, GLsizei h) {
+    g_last_vp_x = x;
+    g_last_vp_y = y;
+    g_last_vp_w = w;
+    g_last_vp_h = h;
+
+    if (g_cur_fbo != 0) {
+        glViewport(x, y, w, h);
+        return;
+    }
+    glViewport(map_viewport_x(x), map_viewport_y(y),
+               map_viewport_w(w), map_viewport_h(h));
+}
+
+void glScissorHook(GLint x, GLint y, GLsizei w, GLsizei h) {
+    GLint sx, sy;
+    GLsizei sw, sh;
+
+    g_last_sc_x = x;
+    g_last_sc_y = y;
+    g_last_sc_w = w;
+    g_last_sc_h = h;
+
+    if (g_cur_fbo != 0) {
+        glScissor(x, y, w, h);
+        return;
+    }
+
+    sx = map_viewport_x(x);
+    sy = map_viewport_y(y);
+    sw = map_viewport_w(w);
+    sh = map_viewport_h(h);
+
+    /* Never let a logical scissor enable drawing into the letterbox bars. */
+    if (sx < g_view_x) { sw -= g_view_x - sx; sx = g_view_x; }
+    if (sy < g_view_y) { sh -= g_view_y - sy; sy = g_view_y; }
+    if (sx + sw > g_view_x + g_view_w) sw = g_view_x + g_view_w - sx;
+    if (sy + sh > g_view_y + g_view_h) sh = g_view_y + g_view_h - sy;
+    if (sw < 0) sw = 0;
+    if (sh < 0) sh = 0;
+
+    glScissor(sx, sy, sw, sh);
+}
+
+void opengl_frame_swapped(void) {
+    g_frame_color_cleared = 0;
+}
+
+void glClearHook(GLbitfield mask) {
+    GLboolean scissor_enabled;
+
+    /* Offscreen targets and 4:3 displays need no letterbox handling. */
+    if (g_cur_fbo != 0 || !viewport_letterboxed() ||
+        !(mask & GL_COLOR_BUFFER_BIT)) {
+        glClear(mask);
+        return;
+    }
+
+    scissor_enabled = glIsEnabled(GL_SCISSOR_TEST);
+    if (scissor_enabled) {
+        /* A scissored clear is a sub-rect update; glScissorHook has already
+         * clipped it to the viewport, so leave the black bars alone. */
+        glClear(mask);
+        return;
+    }
+
+    if (!g_frame_color_cleared) {
+        /* First full-frame colour clear of the frame: black the whole
+         * backbuffer (bars included), then clear the engine area with the
+         * game's own clear colour. */
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glClearColor(g_clear_color[0], g_clear_color[1],
+                     g_clear_color[2], g_clear_color[3]);
+        glColorMask(g_color_mask[0], g_color_mask[1],
+                    g_color_mask[2], g_color_mask[3]);
+        g_frame_color_cleared = 1;
+    }
+
+    /* Keep the game's clear inside the viewport, including later mid-frame
+     * colour clears that could otherwise repaint the letterbox bars. */
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(g_view_x, g_view_y, g_view_w, g_view_h);
+    glClear(mask);
+    glDisable(GL_SCISSOR_TEST);
 }
 
 void glFramebufferTexture2DHook(GLenum target, GLenum attachment,
@@ -327,7 +484,13 @@ SOFTFP void glUniform4fHook(GLint loc, GLfloat x, GLfloat y, GLfloat z, GLfloat 
     { glUniform4f(loc, x, y, z, w); }
 
 SOFTFP void glClearColorHook(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
-    { glClearColor(r, g, b, a); }
+{
+    g_clear_color[0] = r;
+    g_clear_color[1] = g;
+    g_clear_color[2] = b;
+    g_clear_color[3] = a;
+    glClearColor(r, g, b, a);
+}
 
 /* ── Patch entry ──────────────────────────────────────────────────────── */
 

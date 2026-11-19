@@ -1,6 +1,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+/* Logical engine resolution.  The loader presents this in a centred 4:3
+ * viewport scaled to the device's actual display (e.g. 720x720 R36 Ultra). */
 #define SCREEN_W    640
 #define SCREEN_H    480
 

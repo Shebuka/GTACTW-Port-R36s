@@ -15,6 +15,7 @@
 #include "config.h"
 #include "so_util.h"
 #include "jni_patch.h"
+#include "opengl_patch.h"
 
 extern so_module gtactw_mod;
 extern char g_data_path[512];
@@ -214,6 +215,7 @@ static int InitEGLAndGLES2(void) {
 
 static int swapBuffers(void) {
     SDL_GL_SwapWindow(g_window);
+    opengl_frame_swapped();
     return 1;
 }
 

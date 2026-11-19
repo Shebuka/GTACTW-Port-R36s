@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <execinfo.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -48,6 +49,15 @@ SDL_GameController *g_gamepad = NULL;
 int                 g_gamepad_buttons = 0;
 float               g_gamepad_axis[6] = { 0 };
 char                g_data_path[512]  = DATA_PATH;
+
+/* Physical backbuffer and the centred 4:3 area the engine is presented in.
+ * Shared with opengl_patch.c, which remaps the game's viewport/scissor calls. */
+int g_phys_w = SCREEN_W;
+int g_phys_h = SCREEN_H;
+int g_view_x = 0;
+int g_view_y = 0;
+int g_view_w = SCREEN_W;
+int g_view_h = SCREEN_H;
 
 /* ── C++ ABI symbols ─────────────────────────────────────────────────────── */
 extern int  __cxa_atexit(void (*)(void *), void *, void *) __attribute__((weak));
@@ -108,8 +118,47 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
     return 0;
 }
 
-/* ── Screen size (hooked into .so) ───────────────────────────────────────── */
+/* ── Screen size / viewport ─────────────────────────────────────────────── *
+ * The engine always renders a logical SCREEN_W×SCREEN_H frame.  The physical
+ * backbuffer may be larger or have a different aspect ratio (e.g. a 720×720
+ * R36 Ultra panel), so present the logical frame in the largest centred 4:3
+ * rectangle.  opengl_patch.c maps the engine's viewport/scissor calls into it. */
+static void set_viewport_metrics(int phys_w, int phys_h) {
+    if (phys_w <= 0 || phys_h <= 0) return;
 
+    g_phys_w = phys_w;
+    g_phys_h = phys_h;
+
+    /* Largest 4:3 rectangle fitting the physical display. */
+    g_view_w = g_phys_w;
+    g_view_h = (g_phys_w * 3) / 4;
+    if (g_view_h > g_phys_h) {
+        g_view_h = g_phys_h;
+        g_view_w = (g_phys_h * 4) / 3;
+    }
+
+    g_view_x = (g_phys_w - g_view_w) / 2;
+    g_view_y = (g_phys_h - g_view_h) / 2;
+
+    if (g_view_w < 1) g_view_w = 1;
+    if (g_view_h < 1) g_view_h = 1;
+}
+
+static void log_viewport_metrics(const char *tag) {
+    fprintf(stderr, "%s: physical %dx%d, game viewport %dx%d at +%d+%d\n",
+            tag, g_phys_w, g_phys_h, g_view_w, g_view_h, g_view_x, g_view_y);
+}
+
+static void update_viewport_metrics(void) {
+    SDL_DisplayMode dm;
+    if (SDL_GetDesktopDisplayMode(0, &dm) == 0 && dm.w > 0 && dm.h > 0)
+        set_viewport_metrics(dm.w, dm.h);
+    else
+        set_viewport_metrics(SCREEN_W, SCREEN_H);
+    log_viewport_metrics("display");
+}
+
+/* The engine keeps its original logical resolution; only presentation scales. */
 int OS_ScreenGetWidth(void)  { return SCREEN_W; }
 int OS_ScreenGetHeight(void) { return SCREEN_H; }
 
@@ -408,14 +457,15 @@ static int   stack_chk_guard_fake = 0x42424242;
  * (Hynitron cst3xx Touchscreen) and dispatches to the game via AND_TouchEvent.
  * action: 0=down, 1=move, 2=up
  *
- * TOUCH_MAX_X/Y: native reporting range of the touchscreen.  Defaults to
- * SCREEN_W/H (640×480); adjust here if the touchscreen reports different coords.
+ * The ABS_MT range is queried from the kernel and mapped through the physical
+ * display into the centred 4:3 game viewport, so the engine always receives
+ * logical 640×480 coordinates.
  */
 #define MAX_TOUCH_SLOTS 5
-#define TOUCH_MAX_X     SCREEN_W
-#define TOUCH_MAX_Y     SCREEN_H
 
 static int g_touch_fd = -1;
+static int g_touch_min_x = 0, g_touch_max_x = SCREEN_W;
+static int g_touch_min_y = 0, g_touch_max_y = SCREEN_H;
 
 typedef struct {
     int tracking_id;   /* -1 = slot empty */
@@ -434,10 +484,60 @@ static void init_touchscreen(void) {
         g_slots[i].dirty        = 0;
     }
     g_touch_fd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
-    if (g_touch_fd < 0)
+    if (g_touch_fd < 0) {
         fprintf(stderr, "touchscreen: open /dev/input/event1: %s\n", strerror(errno));
-    else
-        fprintf(stderr, "touchscreen: opened fd=%d\n", g_touch_fd);
+        return;
+    }
+
+    struct input_absinfo ai;
+    if (ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_X), &ai) == 0 &&
+        ai.maximum > ai.minimum) {
+        g_touch_min_x = ai.minimum;
+        g_touch_max_x = ai.maximum;
+    } else {
+        g_touch_min_x = 0;
+        g_touch_max_x = g_phys_w;
+    }
+    if (ioctl(g_touch_fd, EVIOCGABS(ABS_MT_POSITION_Y), &ai) == 0 &&
+        ai.maximum > ai.minimum) {
+        g_touch_min_y = ai.minimum;
+        g_touch_max_y = ai.maximum;
+    } else {
+        g_touch_min_y = 0;
+        g_touch_max_y = g_phys_h;
+    }
+
+    fprintf(stderr, "touchscreen: fd=%d x=%d..%d y=%d..%d display=%dx%d\n",
+            g_touch_fd, g_touch_min_x, g_touch_max_x,
+            g_touch_min_y, g_touch_max_y, g_phys_w, g_phys_h);
+}
+
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int map_touch_x(int raw) {
+    int range = g_touch_max_x - g_touch_min_x;
+    int px;
+    if (range <= 0) range = 1;
+    px = (raw - g_touch_min_x) * g_phys_w / range;
+    px = clamp_int(px, 0, g_phys_w - 1);
+    if (g_view_w <= 0) return 0;
+    return clamp_int((px - g_view_x) * SCREEN_W / g_view_w,
+                     0, SCREEN_W - 1);
+}
+
+static int map_touch_y(int raw) {
+    int range = g_touch_max_y - g_touch_min_y;
+    int py;
+    if (range <= 0) range = 1;
+    py = (raw - g_touch_min_y) * g_phys_h / range;
+    py = clamp_int(py, 0, g_phys_h - 1);
+    if (g_view_h <= 0) return 0;
+    return clamp_int((py - g_view_y) * SCREEN_H / g_view_h,
+                     0, SCREEN_H - 1);
 }
 
 static void process_touch_events(void) {
@@ -456,13 +556,13 @@ static void process_touch_events(void) {
                 break;
             case ABS_MT_POSITION_X:
                 if (g_cur_slot < MAX_TOUCH_SLOTS) {
-                    g_slots[g_cur_slot].x = ev.value * SCREEN_W / TOUCH_MAX_X;
+                    g_slots[g_cur_slot].x = map_touch_x(ev.value);
                     g_slots[g_cur_slot].dirty = 1;
                 }
                 break;
             case ABS_MT_POSITION_Y:
                 if (g_cur_slot < MAX_TOUCH_SLOTS) {
-                    g_slots[g_cur_slot].y = ev.value * SCREEN_H / TOUCH_MAX_Y;
+                    g_slots[g_cur_slot].y = map_touch_y(ev.value);
                     g_slots[g_cur_slot].dirty = 1;
                 }
                 break;
@@ -970,9 +1070,9 @@ static so_default_dynlib default_dynlib[] = {
     { "glBlendEquation",              (uintptr_t)glBlendEquation              },
     { "glBlendFunc",                  (uintptr_t)glBlendFuncHook              },
     { "glCheckFramebufferStatus",     (uintptr_t)glCheckFramebufferStatus     },
-    { "glClear",                      (uintptr_t)glClear                      },
+    { "glClear",                      (uintptr_t)glClearHook                 },
     { "glClearColor",                 (uintptr_t)glClearColorHook             },
-    { "glColorMask",                  (uintptr_t)glColorMask                  },
+    { "glColorMask",                  (uintptr_t)glColorMaskHook              },
     { "glCompileShader",              (uintptr_t)glCompileShaderHook          },
     { "glCompressedTexImage2D",       (uintptr_t)glCompressedTexImage2DHook   },
     { "glCreateProgram",              (uintptr_t)glCreateProgram              },
@@ -1005,7 +1105,7 @@ static so_default_dynlib default_dynlib[] = {
     { "glGetUniformLocation",         (uintptr_t)glGetUniformLocation         },
     { "glLinkProgram",                (uintptr_t)glLinkProgramHook            },
     { "glRenderbufferStorage",        (uintptr_t)glRenderbufferStorage        },
-    { "glScissor",                    (uintptr_t)glScissor                    },
+    { "glScissor",                    (uintptr_t)glScissorHook                },
     { "glShaderSource",               (uintptr_t)glShaderSourceHook           },
     { "glTexImage2D",                 (uintptr_t)glTexImage2DHook             },
     { "glTexParameterf",              (uintptr_t)glTexParameterf_abi          },
@@ -1020,7 +1120,7 @@ static so_default_dynlib default_dynlib[] = {
     { "glVertexAttrib3f",             (uintptr_t)glVertexAttrib3f_abi         },
     { "glVertexAttrib4f",             (uintptr_t)glVertexAttrib4f_abi         },
     { "glVertexAttribPointer",        (uintptr_t)glVertexAttribPointerHook    },
-    { "glViewport",                   (uintptr_t)glViewport                   },
+    { "glViewport",                   (uintptr_t)glViewportHook               },
 
     /* ── Misc ABI ─────────────────────────────────────────────────────── */
     { "__assert2",            (uintptr_t)__assert2_impl                    },
@@ -1404,6 +1504,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    update_viewport_metrics();
+
     SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -1418,7 +1520,7 @@ int main(int argc, char *argv[]) {
     g_window = SDL_CreateWindow(
         "GTA: Chinatown Wars",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-        SCREEN_W, SCREEN_H,
+        g_phys_w, g_phys_h,
         SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP
     );
     if (!g_window) {
@@ -1433,6 +1535,24 @@ int main(int argc, char *argv[]) {
     }
     SDL_GL_MakeCurrent(g_window, g_gl_ctx);
     SDL_GL_SetSwapInterval(1);
+
+    {
+        int dw = 0, dh = 0;
+        SDL_GL_GetDrawableSize(g_window, &dw, &dh);
+        if (dw > 0 && dh > 0 &&
+            (dw != g_phys_w || dh != g_phys_h)) {
+            set_viewport_metrics(dw, dh);
+            log_viewport_metrics("display drawable");
+        }
+    }
+
+    /* Black the whole backbuffer once so the letterbox bars never show
+     * uninitialised memory.  The game clears its viewport from here on. */
+    glViewport(0, 0, g_phys_w, g_phys_h);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glViewport(g_view_x, g_view_y, g_view_w, g_view_h);
 
     /* Install signal handlers AFTER SDL_Init so we override SDL2's handlers.
      * SDL2 installs its own SIGSEGV handler during SDL_Init which re-raises
