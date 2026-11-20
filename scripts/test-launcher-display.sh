@@ -27,7 +27,8 @@ trap 'rm -rf "$WORK"' EXIT
 fails=0
 
 # Build a rig and run one launcher through it. $1=mode $2=launcher path.
-# Modes: kmsdrm (no compositor), wayland (fake socket), conf (override file).
+# Modes: kmsdrm (no compositor), wayland (fake socket), conf (videodriver
+# override file), internal (internal_res override file).
 run_rig() {
     # NOTE: separate statements on purpose. In `local a="$1" b="$a"` bash
     # expands every word before applying any assignment, so $mode would still
@@ -57,7 +58,7 @@ run_rig() {
     { echo '#!/bin/bash'
       echo "{ echo \"GAME ENV:\""
       echo '  for v in SDL_VIDEODRIVER SDL_VIDEO_GL_DRIVER SDL_VIDEO_EGL_DRIVER \'
-      echo '           WAYLAND_DISPLAY XDG_RUNTIME_DIR GTACTW_DIR; do'
+      echo '           WAYLAND_DISPLAY XDG_RUNTIME_DIR GTACTW_DIR GTACTW_INTERNAL_RES; do'
       echo '      echo "  $v=${!v}"'
       echo "  done; } >> \"$rig/trace\""
       echo 'exit 0'; } > "$rig/gtactw/gtactw.armhf"
@@ -70,6 +71,7 @@ run_rig() {
     case "$mode" in
         wayland) touch "$rig/run/wayland-1" "$rig/run/wayland-1.lock" ;;
         conf)    echo wayland > "$rig/gtactw/conf/videodriver.txt" ;;
+        internal) echo viewport > "$rig/gtactw/conf/internal_res.txt" ;;
     esac
 
     : > "$rig/trace"
@@ -123,6 +125,13 @@ echo "== conf/videodriver.txt override =="
 C="$(run_rig conf "$LAUNCHER")"
 check "override wins over autodetect"   "$C" 'SDL_VIDEODRIVER=wayland'         yes
 check "override is logged"              "$C" 'from conf/videodriver.txt'       yes
+
+echo "== conf/internal_res.txt override =="
+I="$(run_rig internal "$LAUNCHER")"
+check "exports viewport internal res"   "$I" 'GTACTW_INTERNAL_RES=viewport'    yes
+check "internal res is logged"          "$I" 'internal resolution = viewport' yes
+check "default leaves internal res off" "$K" 'GTACTW_INTERNAL_RES=$'           yes
+check "default internal res is logged"  "$K" 'internal resolution = default'  yes
 
 if [ -n "$BASELINE" ]; then
     echo "== regression vs baseline: $BASELINE =="

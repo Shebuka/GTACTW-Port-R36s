@@ -18,7 +18,7 @@ A 32-bit ARM Android-on-Linux loader: `src/main.c` maps the game's original `lib
 ## Non-obvious invariants
 
 - Any hook that takes/returns `float`/`double` by value must be declared `__attribute__((pcs("aapcs")))` (see `SOFTFP`/`*_abi` in `src/opengl_patch.c`, `src/openal_patch.c`, `src/mpg123_patch.c`). The game uses soft-float, the system libs hard-float; without the thunk the bug is intermittent (e.g. wrong `AL_PITCH`).
-- The engine stays at logical 640×480. `main.c` derives the physical size from the desktop/GL drawable and computes a centred 4:3 viewport; `opengl_patch.c` remaps `glViewport`/`glScissor`/`glClear` into it. Do not make `OS_ScreenGetWidth/Height` report the physical size.
+- The engine defaults to logical 640×480. `main.c` derives the physical size from the desktop/GL drawable and computes a centred 4:3 viewport; `opengl_patch.c` remaps `glViewport`/`glScissor`/`glClear` using the engine size (`g_game_*`). `GTACTW_INTERNAL_RES=viewport` is the experimental opt-in that sets the engine size to the 4:3 viewport (e.g. 720×540); the PortMaster launcher reads it from `conf/internal_res.txt`. Do not make `OS_ScreenGetWidth/Height` report the physical size.
 - Every symbol imported by `libCTW.so` must be listed in `default_dynlib[]` in `src/main.c`; an unresolved GOT slot becomes a PLT pointer and crashes later.
 - Never include `<time.h>` or `<pthread.h>` in `src/clock_fix.c` or `src/clock_preload.c` — glibc's `__asm__` alias creates duplicate `clock_gettime` symbols.
 - libc time functions are patched only if a fault probe proves the native implementation broken; don't make this unconditional (causes `SIGILL` on healthy glibc).

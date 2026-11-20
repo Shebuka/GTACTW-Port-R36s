@@ -89,6 +89,21 @@ back to English and is noted in `gtactw.log`.
 No extra download is needed — all six languages are already inside the GXT that
 the installer extracts from your APK.
 
+## Internal resolution (experimental)
+
+The engine renders at **640×480** by default and the loader scales that into
+the centred 4:3 viewport. To make the engine render at the viewport size
+instead — 720×540 on a 720×720 R36 Ultra, 960×720 on a 1280×720 panel — create
+a single-line file:
+
+```
+<ports>/GTA Chinatown Wars/gtactw/conf/internal_res.txt
+```
+
+containing `viewport`. Use `default` (or remove the file) to return to 640×480.
+A pre-set `$GTACTW_INTERNAL_RES=viewport` is honoured when the file is absent.
+This raises GPU load, so test UI layout and performance on the target device.
+
 ## Display server (KMS/DRM vs. Wayland)
 
 Most CFWs boot straight to a bare KMS console, and the port takes the screen
@@ -143,9 +158,10 @@ unset and SDL uses its own EGL/GL loading.
 - **Ports location:** the launcher passes its own directory to the game via
   `GTACTW_DIR`, so it works from any mount (internal, SD1, SD2) and any CFW's
   ports path — not just `/roms/ports`.
-- **Resolution:** the engine renders at its native **640×480**; the loader
-  presents that in a centred 4:3 viewport scaled to the actual panel, with
-  black bars on non-4:3 screens (e.g. a 720×720 R36 Ultra).
+- **Resolution:** the engine renders at its native **640×480** by default; the
+  loader presents that in a centred 4:3 viewport scaled to the actual panel,
+  with black bars on non-4:3 screens (e.g. a 720×720 R36 Ultra). See
+  **Internal resolution (experimental)** above for the higher-resolution mode.
 - **Root / no `sudo`:** some images run as root and ship no `sudo` binary. The
   launcher no longer assumes `sudo` exists — as root it drops the prefix
   entirely, and as a normal user it only uses `sudo` if it is actually

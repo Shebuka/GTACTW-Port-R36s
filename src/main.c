@@ -59,6 +59,11 @@ int g_view_y = 0;
 int g_view_w = SCREEN_W;
 int g_view_h = SCREEN_H;
 
+/* Logical size reported to the engine.  Defaults to 640x480; the experimental
+ * GTACTW_INTERNAL_RES=viewport mode sets it to the centred 4:3 viewport. */
+int g_game_w = SCREEN_W;
+int g_game_h = SCREEN_H;
+
 /* ── C++ ABI symbols ─────────────────────────────────────────────────────── */
 extern int  __cxa_atexit(void (*)(void *), void *, void *) __attribute__((weak));
 extern void __cxa_finalize(void *)                         __attribute__((weak));
@@ -119,10 +124,16 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
 }
 
 /* ── Screen size / viewport ─────────────────────────────────────────────── *
- * The engine always renders a logical SCREEN_W×SCREEN_H frame.  The physical
- * backbuffer may be larger or have a different aspect ratio (e.g. a 720×720
- * R36 Ultra panel), so present the logical frame in the largest centred 4:3
- * rectangle.  opengl_patch.c maps the engine's viewport/scissor calls into it. */
+ * By default the engine keeps its original logical SCREEN_W×SCREEN_H frame.
+ * The physical backbuffer may be larger or have a different aspect ratio
+ * (e.g. a 720×720 R36 Ultra panel), so present that frame in the largest
+ * centred 4:3 rectangle.  GTACTW_INTERNAL_RES=viewport instead makes the
+ * engine render at the 4:3 viewport size (720×540 on a 720×720 panel). */
+static int use_viewport_internal_res(void) {
+    const char *v = getenv("GTACTW_INTERNAL_RES");
+    return v && (strcmp(v, "viewport") == 0 || strcmp(v, "1") == 0);
+}
+
 static void set_viewport_metrics(int phys_w, int phys_h) {
     if (phys_w <= 0 || phys_h <= 0) return;
 
@@ -142,11 +153,22 @@ static void set_viewport_metrics(int phys_w, int phys_h) {
 
     if (g_view_w < 1) g_view_w = 1;
     if (g_view_h < 1) g_view_h = 1;
+
+    if (use_viewport_internal_res()) {
+        g_game_w = g_view_w;
+        g_game_h = g_view_h;
+    } else {
+        g_game_w = SCREEN_W;
+        g_game_h = SCREEN_H;
+    }
+    opengl_reset_logical_state();
 }
 
 static void log_viewport_metrics(const char *tag) {
-    fprintf(stderr, "%s: physical %dx%d, game viewport %dx%d at +%d+%d\n",
-            tag, g_phys_w, g_phys_h, g_view_w, g_view_h, g_view_x, g_view_y);
+    fprintf(stderr,
+            "%s: physical %dx%d, game viewport %dx%d at +%d+%d, engine %dx%d\n",
+            tag, g_phys_w, g_phys_h, g_view_w, g_view_h,
+            g_view_x, g_view_y, g_game_w, g_game_h);
 }
 
 static void update_viewport_metrics(void) {
@@ -158,9 +180,9 @@ static void update_viewport_metrics(void) {
     log_viewport_metrics("display");
 }
 
-/* The engine keeps its original logical resolution; only presentation scales. */
-int OS_ScreenGetWidth(void)  { return SCREEN_W; }
-int OS_ScreenGetHeight(void) { return SCREEN_H; }
+/* The engine sees g_game_w/h; default is 640x480, opt-in can be the viewport. */
+int OS_ScreenGetWidth(void)  { return g_game_w; }
+int OS_ScreenGetHeight(void) { return g_game_h; }
 
 /* ── Bionic pthread/semaphore ABI shims ──────────────────────────────────────
  * On Android bionic (32-bit): mutex=4 bytes, cond=4 bytes, sem=4 bytes.
@@ -525,8 +547,8 @@ static int map_touch_x(int raw) {
     px = (raw - g_touch_min_x) * g_phys_w / range;
     px = clamp_int(px, 0, g_phys_w - 1);
     if (g_view_w <= 0) return 0;
-    return clamp_int((px - g_view_x) * SCREEN_W / g_view_w,
-                     0, SCREEN_W - 1);
+    return clamp_int((px - g_view_x) * g_game_w / g_view_w,
+                     0, g_game_w - 1);
 }
 
 static int map_touch_y(int raw) {
@@ -536,8 +558,8 @@ static int map_touch_y(int raw) {
     py = (raw - g_touch_min_y) * g_phys_h / range;
     py = clamp_int(py, 0, g_phys_h - 1);
     if (g_view_h <= 0) return 0;
-    return clamp_int((py - g_view_y) * SCREEN_H / g_view_h,
-                     0, SCREEN_H - 1);
+    return clamp_int((py - g_view_y) * g_game_h / g_view_h,
+                     0, g_game_h - 1);
 }
 
 static void process_touch_events(void) {

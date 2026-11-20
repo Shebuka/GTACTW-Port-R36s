@@ -13,9 +13,10 @@
 
 extern so_module gtactw_mod;
 
-/* Physical backbuffer and centred 4:3 game viewport, owned by main.c. */
+/* Physical backbuffer, centred 4:3 viewport, and engine logical size. */
 extern int g_phys_w, g_phys_h;
 extern int g_view_x, g_view_y, g_view_w, g_view_h;
+extern int g_game_w, g_game_h;
 
 static GLuint cur_prog;
 static GLuint g_cur_fbo = 0;
@@ -76,35 +77,36 @@ void glBindFramebufferHook(GLenum target, GLuint fbo) {
     glScissorHook(g_last_sc_x, g_last_sc_y, g_last_sc_w, g_last_sc_h);
 }
 
-/* ── Logical 640×480 → centred physical viewport ─────────────────────────
- * libCTW always renders a 640×480 frame.  The default framebuffer may be a
- * different size (720×720, 1280×720, …), so remap its viewport and scissor
- * into the centred 4:3 area.  Offscreen FBOs keep their original coordinates:
- * those targets are the engine's own 640×480 render surfaces. */
+/* ── Engine logical size → centred physical viewport ─────────────────────
+ * The engine reports g_game_w×g_game_h through OS_ScreenGet*.  By default
+ * that is 640×480; GTACTW_INTERNAL_RES=viewport makes it the 4:3 viewport
+ * size instead.  Scale the engine's viewport/scissor calls into the centred
+ * 4:3 area.  Offscreen FBOs keep their original coordinates: those targets
+ * are the engine's own render surfaces. */
 static int viewport_letterboxed(void) {
     return g_view_w > 0 && g_view_h > 0 &&
            (g_view_w != g_phys_w || g_view_h != g_phys_h);
 }
 
 static GLint map_viewport_x(GLint x) {
-    return g_view_x + (x * g_view_w) / SCREEN_W;
+    return g_view_x + (x * g_view_w) / g_game_w;
 }
 
 static GLint map_viewport_y(GLint y) {
-    return g_view_y + (y * g_view_h) / SCREEN_H;
+    return g_view_y + (y * g_view_h) / g_game_h;
 }
 
 static GLsizei map_viewport_w(GLsizei w) {
     GLsizei v;
     if (w <= 0) return 0;
-    v = (w * g_view_w) / SCREEN_W;
+    v = (w * g_view_w) / g_game_w;
     return v > 0 ? v : 1;
 }
 
 static GLsizei map_viewport_h(GLsizei h) {
     GLsizei v;
     if (h <= 0) return 0;
-    v = (h * g_view_h) / SCREEN_H;
+    v = (h * g_view_h) / g_game_h;
     return v > 0 ? v : 1;
 }
 
@@ -154,6 +156,17 @@ void glScissorHook(GLint x, GLint y, GLsizei w, GLsizei h) {
 
 void opengl_frame_swapped(void) {
     g_frame_color_cleared = 0;
+}
+
+void opengl_reset_logical_state(void) {
+    g_last_vp_x = 0;
+    g_last_vp_y = 0;
+    g_last_vp_w = g_game_w;
+    g_last_vp_h = g_game_h;
+    g_last_sc_x = 0;
+    g_last_sc_y = 0;
+    g_last_sc_w = g_game_w;
+    g_last_sc_h = g_game_h;
 }
 
 void glClearHook(GLbitfield mask) {

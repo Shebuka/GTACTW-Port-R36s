@@ -25,6 +25,7 @@ void glViewportHook(int, int, int, int);
 void glScissorHook(int, int, int, int);
 void glClearHook(unsigned int);
 void opengl_frame_swapped(void);
+void opengl_reset_logical_state(void);
 void glFramebufferTexture2DHook(unsigned int, unsigned int, unsigned int, unsigned int, int);
 void glCompileShaderHook(unsigned int);
 void glUniformMatrix4fvHook(int, int, unsigned char, const float *);

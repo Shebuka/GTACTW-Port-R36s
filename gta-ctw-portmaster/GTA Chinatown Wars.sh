@@ -377,6 +377,36 @@ if [ -n "$GAME_LANG" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────
+# 4c. Experimental internal resolution.
+#
+# Default is the engine's native 640x480 presented in the centred 4:3
+# viewport.  A one-line conf/internal_res.txt containing "viewport" makes the
+# engine render at the viewport size instead (720x540 on a 720x720 panel).
+# Precedence: conf file, inherited $GTACTW_INTERNAL_RES, default.
+# ──────────────────────────────────────────────────────────────────────────
+INTERNAL_RES_FILE="$CONFDIR/internal_res.txt"
+if [ -f "$INTERNAL_RES_FILE" ]; then
+    GAME_INTERNAL_RES="$(tr -d ' \t\r\n' < "$INTERNAL_RES_FILE" | tr '[:upper:]' '[:lower:]')"
+else
+    GAME_INTERNAL_RES="${GTACTW_INTERNAL_RES:-}"
+fi
+case "$GAME_INTERNAL_RES" in
+    viewport|1)
+        export GTACTW_INTERNAL_RES=viewport
+        echo "launcher: internal resolution = viewport" >> "$GAMEDIR/gtactw.log"
+        ;;
+    ""|default|0)
+        unset GTACTW_INTERNAL_RES
+        echo "launcher: internal resolution = default (640x480)" >> "$GAMEDIR/gtactw.log"
+        ;;
+    *)
+        unset GTACTW_INTERNAL_RES
+        echo "launcher: unsupported internal resolution '$GAME_INTERNAL_RES' — using default" \
+            >> "$GAMEDIR/gtactw.log"
+        ;;
+esac
+
+# ──────────────────────────────────────────────────────────────────────────
 # 5. Game run. Log only from here; the game owns the framebuffer.
 # ──────────────────────────────────────────────────────────────────────────
 exec > >(tee -a "$GAMEDIR/gtactw.log") 2>&1

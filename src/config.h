@@ -1,8 +1,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-/* Logical engine resolution.  The loader presents this in a centred 4:3
- * viewport scaled to the device's actual display (e.g. 720x720 R36 Ultra). */
+/* Default logical engine resolution.  The loader presents this in a centred
+ * 4:3 viewport scaled to the device's display.  GTACTW_INTERNAL_RES=viewport
+ * instead uses the viewport size as the engine's internal resolution. */
 #define SCREEN_W    640
 #define SCREEN_H    480
 
